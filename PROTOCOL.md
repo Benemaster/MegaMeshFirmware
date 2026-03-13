@@ -30,7 +30,7 @@ graph TB
     BLE_APP <-->|"GATT Notify/Write"| BLE_STACK
     BLE_STACK -->|"RX Char"| CMD_QUEUE
     CMD_QUEUE --> CMD_HANDLER
-    BLE_STACK <--|"TX Char (Notify)"| MESH_LOGIC
+    MESH_LOGIC -->|"TX Char (Notify)"| BLE_STACK
     CMD_HANDLER --> MESH_LOGIC
     MESH_LOGIC <--> ENCRYPT
     MESH_LOGIC <--> NVS

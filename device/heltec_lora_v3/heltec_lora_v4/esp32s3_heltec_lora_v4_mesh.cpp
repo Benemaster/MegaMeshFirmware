@@ -203,10 +203,10 @@ bool reliableSendEnabled = true;
 
 // Sleep mode configuration
 bool sleepModeEnabled = false;
-static const uint64_t SLEEP_MAINTENANCE_US = 5000000ULL; // 5 s timer wakeup for retries/maintenance
-static const uint32_t SLEEP_IDLE_MS = 200;               // idle time before sleep
-static const uint32_t IDLE_LOOP_DELAY_MS = 2;            // throttle busy-loop when sleep mode is off
-static const uint32_t OUTBOUND_PROCESS_INTERVAL_MS = 25; // run retry maintenance at ~40 Hz instead of every loop
+static const uint64_t SLEEP_MAINTENANCE_US = 30000000ULL; // 30 s timer wakeup for retries/maintenance
+static const uint32_t SLEEP_IDLE_MS = 200;                // idle time before sleep
+static const uint32_t IDLE_LOOP_DELAY_MS = 2;             // throttle busy-loop when sleep mode is off
+static const uint32_t OUTBOUND_PROCESS_INTERVAL_MS = 250; // run retry maintenance at ~4 Hz instead of every loop
 
 // Weather station location
 float wxLatitude = 0.0; // i love Gleitkommazahlen und das ist irgendwo im meer
@@ -1538,7 +1538,6 @@ void handleReceivedPacket()
             }
         }
 
-        char textBuffer[MAX_MESH_PAYLOAD + 1];
         memcpy(textBuffer, payloadWork, copyLen);
         textBuffer[copyLen] = '\0';
 
@@ -2530,6 +2529,7 @@ void loop()
 {
     bool hadWork = false;
     uint32_t nowMs = millis();
+    bool bootBtnHigh = (digitalRead(PIN_BOOT_BTN) == HIGH);
 
     if (Serial.available())
     {
@@ -2556,7 +2556,7 @@ void loop()
     {
         static uint32_t btnLowSince = 0;
         static bool btnActionDone = false;
-        if (digitalRead(PIN_BOOT_BTN) == LOW)
+        if (!bootBtnHigh)
         {
             if (btnLowSince == 0)
                 btnLowSince = millis();
@@ -2613,13 +2613,24 @@ void loop()
         handleSerialLine(cmd);
     }
 
-    // Flush offline inbox when BLE just connected
-    if (pendingInboxFlush && bleConnected)
+    // Flush offline inbox when BLE just connected — non-blocking 800 ms stabilisation delay
     {
-        hadWork = true;
-        pendingInboxFlush = false;
-        delay(800); // let BLE stabilize (MTU negotiation etc.)
-        flushInbox();
+        static uint32_t inboxFlushAt = 0;
+        if (pendingInboxFlush && bleConnected)
+        {
+            pendingInboxFlush = false;
+            inboxFlushAt = nowMs + 800;
+        }
+        if (!bleConnected)
+        {
+            inboxFlushAt = 0;
+        }
+        if (inboxFlushAt != 0 && bleConnected && (int32_t)(nowMs - inboxFlushAt) >= 0)
+        {
+            hadWork = true;
+            inboxFlushAt = 0;
+            flushInbox();
+        }
     }
 
     if (radioIrq)
@@ -2647,7 +2658,7 @@ void loop()
         bleCmdHead == bleCmdTail &&
         !displayActive &&
         !bleConnected &&
-        digitalRead(PIN_BOOT_BTN) == HIGH) // don't enter sleep while button is held
+        bootBtnHigh) // don't enter sleep while button is held
     {
         delay(SLEEP_IDLE_MS); // small guard so serial chars can arrive
         if (!radioIrq && !Serial.available() && bleCmdHead == bleCmdTail &&

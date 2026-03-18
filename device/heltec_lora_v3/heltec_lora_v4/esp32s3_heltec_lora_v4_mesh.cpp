@@ -11,6 +11,8 @@
 // GitHub Projekt Page:                                                           //
 // GitHub Web Client:                                                             //
 // ------------------------------------------------------------------------------ //
+// Inspiration and code snippets taken from Meshtastic project by various authors //
+// ------------------------------------------------------------------------------ //
 // Basic explenation of the project:                                              //
 //                                                                                //
 // This project trys to create a indipendent scaleble meshcommunication network   //
@@ -55,16 +57,12 @@ static const uint8_t PIN_SDA = 17;
 static const uint8_t PIN_SCL = 18;
 
 // Battery monitoring pins (Heltec V4)
-static const uint8_t PIN_VBAT_ADC = 1;  // Battery voltage ADC (GPIO1)
-static const uint8_t PIN_ADC_CTRL = 37; // ADC enable – LOW to activate divider
+static const uint8_t PIN_VBAT_ADC = 1;
+static const uint8_t PIN_ADC_CTRL = 37;
 
-// BOOT button: GPIO0, active LOW, hardware pull-up to 3.3 V
 static const uint8_t PIN_BOOT_BTN = 0;
 
-// GC1109 FEM (Front-End Module) pin definitions – Heltec V4
-// RF path: SX1262 -> 17 dB Pi attenuator -> GC1109 PA -> Antenna
-// TX/RX path switching (CTX pin) is handled automatically via DIO2 (SX126X_DIO2_AS_RF_SWITCH)
-static const uint8_t PIN_PA_POWER = 7;  // VFEM_Ctrl – GC1109 LDO power enable (always HIGH)
+static const uint8_t PIN_PA_POWER = 7;  // VFEM_Ctrl
 static const uint8_t PIN_PA_EN = 2;     // CSD – chip enable (HIGH = on, LOW = shutdown)
 static const uint8_t PIN_PA_TX_EN = 46; // CPS – PA mode select (HIGH = full PA for TX, LOW = bypass/RX)
 
@@ -79,10 +77,7 @@ static int8_t loraPower = LORA_SX1262_MAX; // mutable – use /txpower 2..22 to 
 static const uint16_t LORA_PREAMBLE = 8;
 static const float LORA_TCXO_VOLTAGE = 1.6;
 
-// Non-linear PA gain table (measured by Quency-D / JasonKrijgsman)
-// Index = SX1262 output power in dBm, value = estimated antenna output in dBm * 10
-// Based on measurements: SX1262 -> 17 dB attenuator -> GC1109 PA -> antenna
-// PA saturates around +27..28 dBm; settings above ~20 yield no extra output.
+// Nonlinear PA gain table (measured by Quency-D / JasonKrijgsman) https://github.com/meshtastic/firmware/issues/8070#issuecomment-3905296922
 static const int16_t PA_OUTPUT_DBM_X10[] = {
     //  0     1     2     3     4     5     6     7     8     9
     50, 70, 85, 100, 110, 122, 135, 150, 168, 185,
@@ -1728,6 +1723,8 @@ void printHelp()
     out.println(F("/sleep on|off|status -> Schlafmodus (DIO1 wakeup)"));
     out.println(F("/save              -> Einstellungen sofort auf Flash speichern"));
     out.println(F("/settings          -> alle Einstellungen anzeigen (JSON)"));
+    out.println(F("/imgstart <id> <meta> -> Bild-Header senden (App-intern)"));
+    out.println(F("/imgchunk <id> <meta> -> Bild-Chunk senden  (App-intern)"));
     out.println(F("jede andere Zeile  -> als Mesh-Nachricht senden"));
 }
 
@@ -2265,6 +2262,65 @@ void handleSerialLine(String line)
         return;
     }
 
+    // Image transfer (sent from Android app)
+    // Syntax: /imgstart <nodeId> <imgId>:<totalChunks>:<width>:<height>:<bpp>
+    if (line.startsWith("/imgstart "))
+    {
+        String rest = line.substring(10);
+        rest.trim();
+        int split = rest.indexOf(' ');
+        if (split <= 0)
+        {
+            out.println("Syntax: /imgstart <nodeId> <imgId>:<total>:<w>:<h>:<bpp>");
+            return;
+        }
+        String nodeToken = rest.substring(0, split);
+        String meta = rest.substring(split + 1);
+        meta.trim();
+        uint16_t targetNode = 0;
+        if (!parseNodeValue(nodeToken, targetNode))
+        {
+            out.println("Ungueltige Node-ID.");
+            return;
+        }
+        String payload = String("#MESH_IMG_S:") + meta;
+        if (sendTextTo(targetNode, payload))
+        {
+            out.print("IMG_START -> 0x");
+            out.println(targetNode, HEX);
+        }
+        return;
+    }
+
+    // Syntax: /imgchunk <nodeId> <imgId>:<chunkIdx>:<hexData>
+    if (line.startsWith("/imgchunk "))
+    {
+        String rest = line.substring(10);
+        rest.trim();
+        int split = rest.indexOf(' ');
+        if (split <= 0)
+        {
+            out.println("Syntax: /imgchunk <nodeId> <imgId>:<idx>:<hex>");
+            return;
+        }
+        String nodeToken = rest.substring(0, split);
+        String meta = rest.substring(split + 1);
+        meta.trim();
+        uint16_t targetNode = 0;
+        if (!parseNodeValue(nodeToken, targetNode))
+        {
+            out.println("Ungueltige Node-ID.");
+            return;
+        }
+        String payload = String("#MESH_IMG_C:") + meta;
+        if (sendTextTo(targetNode, payload))
+        {
+            out.print("IMG_CHUNK -> 0x");
+            out.println(targetNode, HEX);
+        }
+        return;
+    }
+
     sendUserMessage(line);
 }
 
@@ -2372,14 +2428,13 @@ void setup()
     pAdvertising->setMaxPreferred(0x12);
     startBLEAdvertising(); // records start time for the 3-minute timeout
 
-    // GC1109 FEM initialization
-    // VFEM_Ctrl: power enable for GC1109 LDO – must be HIGH always
+    // output
     pinMode(PIN_PA_POWER, OUTPUT);
     digitalWrite(PIN_PA_POWER, HIGH);
-    // CSD: chip enable – must be HIGH to enable GC1109 for both RX and TX
+
     pinMode(PIN_PA_EN, OUTPUT);
     digitalWrite(PIN_PA_EN, HIGH);
-    // CPS: PA mode select – LOW = bypass/RX-ready, HIGH = full PA (set during TX)
+
     pinMode(PIN_PA_TX_EN, OUTPUT);
     digitalWrite(PIN_PA_TX_EN, LOW);
 
@@ -2397,11 +2452,11 @@ void setup()
         LORA_TCXO_VOLTAGE,
         false);
 
-    if (state != RADIOLIB_ERR_NONE)
+    if (state != RADIOLIB_ERR_NONE) // fehlerbehbungung debug
     {
         out.print("LoRa init Fehler: ");
         out.println(state);
-        out.println("Bitte Pins und TCXO-Spannung pruefen. Reset erforderlich.");
+        out.println("Bitte Pins und TCXO-Spannung prüfen. Reset erforderlich.");
 
         // Show error on display
         display.clear();
@@ -2411,7 +2466,7 @@ void setup()
         char errBuf[32];
         snprintf(errBuf, sizeof(errBuf), "Code: %d", state);
         display.drawString(64, 30, errBuf);
-        display.drawString(64, 44, "TCXO/Pins pruefen");
+        display.drawString(64, 44, "TCXO/Pins prüfen");
         display.display();
 
         // Keep printing so the error is visible even when serial is opened late.

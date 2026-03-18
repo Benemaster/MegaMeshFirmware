@@ -306,14 +306,13 @@ void flushInbox()
         out.print(" text=");
         out.println(e.text);
         e.used = false;
-        delay(20); // small gap between messages
+        delay(20);
     }
 }
 
-// Flag to flush inbox on next loop iteration (set from BLE callback)
+// Flag for inbox flush
 volatile bool pendingInboxFlush = false;
 
-// BLE advertising helpers – always call these instead of BLEDevice:: directly
 void startBLEAdvertising()
 {
     BLEDevice::startAdvertising();
@@ -517,17 +516,15 @@ void printPeerKeys()
     }
 }
 
-// Battery voltage helpers (Heltec V3)
-
+// Battery voltage
 float readBatteryVoltage()
 {
     pinMode(PIN_ADC_CTRL, OUTPUT);
-    digitalWrite(PIN_ADC_CTRL, LOW);                 // enable voltage divider
-    analogSetPinAttenuation(PIN_VBAT_ADC, ADC_11db); // full range ~3.3V
+    digitalWrite(PIN_ADC_CTRL, LOW);
+    analogSetPinAttenuation(PIN_VBAT_ADC, ADC_11db);
     delay(10);
     uint32_t raw = analogReadMilliVolts(PIN_VBAT_ADC);
     digitalWrite(PIN_ADC_CTRL, HIGH); // disable to save power
-    // Heltec V3 uses a 390k/390k divider → factor ≈ 2.0
     float voltage = raw * 2.0f / 1000.0f;
     return voltage;
 }
@@ -547,7 +544,7 @@ void printBatteryInfo()
     float v = readBatteryVoltage();
     if (v < 1.0f)
     {
-        out.println("Battery: not connected (USB only)");
+        out.println("Battery: not connected (USB)");
         return;
     }
     uint8_t pct = batteryPercent(v);
@@ -595,21 +592,21 @@ void drawDisplayUI()
     display.drawString(0, 0, hdr);
     display.drawHorizontalLine(0, 12, 128);
 
-    // Battery icon (top-right: 20x10 body + 3x4 nub)
+    // Battery icon (ai)
     display.drawRect(104, 1, 20, 10);
     display.fillRect(124, 4, 3, 4);
     uint8_t fillW = (uint8_t)(16.0f * pct / 100.0f);
     if (fillW > 0)
         display.fillRect(106, 3, fillW, 6);
 
-    // Station count (large, centred)
+    // Station count
     display.setFont(ArialMT_Plain_16);
     display.setTextAlignment(TEXT_ALIGN_CENTER);
     char staBuf[24];
     snprintf(staBuf, sizeof(staBuf), "%d Station%s", stationCount, stationCount == 1 ? "" : "en");
     display.drawString(64, 16, staBuf);
 
-    // Battery voltage / percent
+    // Battery voltage , percent
     char batBuf[20];
     if (voltage < 1.0f)
         snprintf(batBuf, sizeof(batBuf), "USB (no bat)");
@@ -620,21 +617,21 @@ void drawDisplayUI()
     // Footer
     display.drawHorizontalLine(0, 54, 128);
     display.setFont(ArialMT_Plain_10);
-    display.drawString(64, 54, bleConnected ? "BLE verbunden" : "BLE getrennt");
+    display.drawString(64, 52, bleConnected ? "BLE verbunden" : "BLE getrennt");
 
     display.display();
 }
 
-// Light-sleep helpers (DIO1 wakeup)
+// Light-sleep
 
 void enterLightSleep()
 {
-    // Wake on DIO1 HIGH (LoRa packet received)
+    // Wake on DIO1 HIGH
     rtc_gpio_wakeup_enable(static_cast<gpio_num_t>(PIN_DIO1), GPIO_INTR_HIGH_LEVEL);
-    // Wake on BOOT button LOW (active-low, user pressed PRG/BOOT)
+    // Wake on BOOT button LOW 
     rtc_gpio_wakeup_enable(static_cast<gpio_num_t>(PIN_BOOT_BTN), GPIO_INTR_LOW_LEVEL);
     esp_sleep_enable_gpio_wakeup();
-    // Also wake on timer for maintenance (retry buffer, serial, etc.)
+    // Also wake on timer(no timer jet)
     esp_sleep_enable_timer_wakeup(SLEEP_MAINTENANCE_US);
     esp_light_sleep_start();
     rtc_gpio_wakeup_disable(static_cast<gpio_num_t>(PIN_BOOT_BTN));
@@ -643,7 +640,7 @@ void enterLightSleep()
 
 void cryptPayload(uint8_t *buffer, size_t len, const uint8_t *key, const MeshHeader &header)
 {
-    // Initialize the AES context
+    // Initialize mbedtls shit locally aes encryption
     mbedtls_aes_context aes;
     mbedtls_aes_init(&aes);
 
@@ -666,7 +663,7 @@ void cryptPayload(uint8_t *buffer, size_t len, const uint8_t *key, const MeshHea
     // CTR mode
     mbedtls_aes_crypt_ctr(&aes, len, &nc_off, iv, stream_block, buffer, buffer);
 
-    // clean to prevent memory leaks
+    // else memory leak
     mbedtls_aes_free(&aes);
 }
 
@@ -700,7 +697,7 @@ void updateStation(uint16_t node, float rssi, float snr, uint8_t hops)
         return;
     }
 
-    // New station — find empty slot
+    // New station find empty slot
     for (uint8_t index = 0; index < STATION_CACHE_SIZE; index++)
     {
         if (stations[index].node == 0)
@@ -712,7 +709,7 @@ void updateStation(uint16_t node, float rssi, float snr, uint8_t hops)
 
     if (slot < 0)
     {
-        // Evict worst station: highest hops first, then oldest
+        // sort worst station: highest hops first, then oldest
         uint8_t worst = 0;
         for (uint8_t index = 1; index < STATION_CACHE_SIZE; index++)
         {
@@ -763,7 +760,7 @@ void printStations()
     }
 }
 
-#if defined(ESP8266) || defined(ESP32)
+#if defined(ESP8266) || defined(ESP32) //early ai fix for RadioLib something with ram good for different esp
 ICACHE_RAM_ATTR
 #endif
 void setRadioFlag(void)
@@ -834,10 +831,10 @@ bool sendMeshFrame(MeshHeader &header, const uint8_t *payload)
     return true;
 }
 
-// Outgoing message buffer management for reliable send(optoinal feature)
+// Outgoing message buffer
 int findFreeOutboundSlot()
 {
-    for (uint8_t i = 0; i < OUTBOUND_BUFFER_SIZE; i++)
+    for (uint8_t i = 0; i < OUTBOUND_BUFFER_SIZE; i++) //there are only 8 slots so uint8_t is top
     {
         if (!outboundBuffer[i].active)
             return i;
@@ -941,7 +938,7 @@ void printOutboundBuffer()
 // Forward declaration
 bool sendTextTo(uint16_t destination, const String &text, bool encrypted = false);
 
-// ACK helper
+// ACK(acknowledgment, bestätigung)
 
 void sendAck(uint16_t destination, uint16_t ackedOrigin, uint16_t ackedMsgId)
 {
@@ -951,13 +948,13 @@ void sendAck(uint16_t destination, uint16_t ackedOrigin, uint16_t ackedMsgId)
     sendTextTo(destination, payload);
 }
 
-// Trace route helpers
+// Trace route
 
 void sendTraceRoute(uint16_t destination)
 {
     if (destination == MESH_BROADCAST)
     {
-        out.println("Traceroute requires a specific node ID.");
+        out.println("Traceroute needs a specific node ID.");
         return;
     }
     // Payload: "#MESH_TRACE_REQ:0xOrigin"
@@ -1220,7 +1217,7 @@ void relayIfNeeded(const MeshHeader &incoming, const uint8_t *payload, bool alre
     relay.hopCount = incoming.hopCount + 1;
     rememberSeen(relay.origin, relay.msgId);
 
-    // Special handling: append our node ID to trace route requests before relaying
+    // Special handling for trace route when request first arrrives
     if (decodedText != nullptr)
     {
         String txt(decodedText);
@@ -1374,7 +1371,7 @@ void handleReceivedPacket()
 
         String payloadText = decryptedYeah ? String(textBuffer) : String("");
 
-        // ── Handle ACK messages ──────────────────────────────────────
+        // Handle ACK messages
         if (decryptedYeah && payloadText.startsWith(String(CTRL_ACK)) && header.destination == nodeId)
         {
             // Format: #MESH_ACK:<originHex>:<msgId>
@@ -1393,7 +1390,7 @@ void handleReceivedPacket()
             }
         }
 
-        // ── Handle trace route request (we are the destination) ──────
+        // Handle trace route request (we are the destination)
         if (!alreadySeen && decryptedYeah && payloadText.startsWith(String(CTRL_TRACE_REQ)) && header.destination == nodeId && header.origin != nodeId)
         {
             // Append ourselves and send back as TRACE_RESP
@@ -1407,7 +1404,7 @@ void handleReceivedPacket()
             out.println(route);
         }
 
-        // ── Handle trace route response (we are the origin) ─────────
+        // Handle trace route response (we are the origin)
         if (decryptedYeah && payloadText.startsWith(String(CTRL_TRACE_RESP)) && header.destination == nodeId)
         {
             String route = payloadText.substring(String(CTRL_TRACE_RESP).length() + 1);
@@ -1417,7 +1414,7 @@ void handleReceivedPacket()
             out.println(route);
         }
 
-        // ── Handle discovery ─────────────────────────────────────────
+        // Handle discovery
         if (!alreadySeen && decryptedYeah && payloadText == CTRL_DISC_REQ && header.origin != nodeId)
         {
             sendDiscoveryResponse(header.origin);
@@ -1523,6 +1520,8 @@ void printHelp()
     out.println("/txpower <2..30>   -> TX Power in dBm setzen");
     out.println("/sleep on|off|status -> Schlafmodus (DIO1 wakeup)");
     out.println("/settings          -> alle Einstellungen anzeigen (JSON)");
+    out.println("/imgstart <id> <meta> -> Bild-Header senden (App-intern)");
+    out.println("/imgchunk <id> <meta> -> Bild-Chunk senden  (App-intern)");
     out.println("jede andere Zeile  -> als Mesh-Nachricht senden");
 }
 
@@ -2024,6 +2023,65 @@ void handleSerialLine(String line)
     {
         out.print("Sleep mode: ");
         out.println(sleepModeEnabled ? "ON" : "OFF");
+        return;
+    }
+
+    // ── Bilduebertragung (von Android-App gesendet) ───────────────────
+    // Syntax: /imgstart <nodeId> <imgId>:<totalChunks>:<width>:<height>:<bpp>
+    if (line.startsWith("/imgstart "))
+    {
+        String rest = line.substring(10);
+        rest.trim();
+        int split = rest.indexOf(' ');
+        if (split <= 0)
+        {
+            out.println("Syntax: /imgstart <nodeId> <imgId>:<total>:<w>:<h>:<bpp>");
+            return;
+        }
+        String nodeToken = rest.substring(0, split);
+        String meta = rest.substring(split + 1);
+        meta.trim();
+        uint16_t targetNode = 0;
+        if (!parseNodeValue(nodeToken, targetNode))
+        {
+            out.println("Ungueltige Node-ID.");
+            return;
+        }
+        String payload = String("#MESH_IMG_S:") + meta;
+        if (sendTextTo(targetNode, payload))
+        {
+            out.print("IMG_START -> 0x");
+            out.println(targetNode, HEX);
+        }
+        return;
+    }
+
+    // Syntax: /imgchunk <nodeId> <imgId>:<chunkIdx>:<hexData>
+    if (line.startsWith("/imgchunk "))
+    {
+        String rest = line.substring(10);
+        rest.trim();
+        int split = rest.indexOf(' ');
+        if (split <= 0)
+        {
+            out.println("Syntax: /imgchunk <nodeId> <imgId>:<idx>:<hex>");
+            return;
+        }
+        String nodeToken = rest.substring(0, split);
+        String meta = rest.substring(split + 1);
+        meta.trim();
+        uint16_t targetNode = 0;
+        if (!parseNodeValue(nodeToken, targetNode))
+        {
+            out.println("Ungueltige Node-ID.");
+            return;
+        }
+        String payload = String("#MESH_IMG_C:") + meta;
+        if (sendTextTo(targetNode, payload))
+        {
+            out.print("IMG_CHUNK -> 0x");
+            out.println(targetNode, HEX);
+        }
         return;
     }
 

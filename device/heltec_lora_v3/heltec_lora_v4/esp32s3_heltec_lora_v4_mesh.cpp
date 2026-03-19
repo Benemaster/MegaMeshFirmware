@@ -70,7 +70,7 @@ static const uint8_t PIN_PA_TX_EN = 46; // CPS – PA mode select (HIGH = full P
 static const float LORA_FREQUENCY = 869.4;
 static const float LORA_BANDWIDTH = 125.0;
 static const uint8_t LORA_SF = 9;
-static const uint8_t LORA_CR = 7;
+static const uint8_t LORA_CR = 5;
 static const uint8_t LORA_SYNC_WORD = 0x12;
 static const int8_t LORA_SX1262_MAX = 22;  // SX1262 chip maximum output power
 static int8_t loraPower = LORA_SX1262_MAX; // mutable – use /txpower 2..22 to adjust at runtime
@@ -284,6 +284,23 @@ struct PersistentSettings
 Preferences nvs;
 bool settingsDirty = false;
 uint32_t settingsDirtyAt = 0; // millis() when first dirtied
+
+// Listen Before Talk (LBT) configuration
+static const float LBT_RSSI_THRESHOLD = -90.0f; // channel considered busy above this dBm
+static const uint8_t LBT_MAX_RETRIES = 3;
+static const uint32_t LBT_RETRY_DELAY_MS = 150;
+
+// Image relay buffer: intermediate nodes buffer image frames for LBT forwarding
+#define IMG_RELAY_BUFFER_SIZE 4
+struct ImgRelayEntry
+{
+    bool active;
+    MeshHeader header;
+    uint8_t payload[MAX_MESH_PAYLOAD];
+    uint8_t retries;
+    uint32_t nextRetryAt;
+};
+ImgRelayEntry imgRelayBuffer[IMG_RELAY_BUFFER_SIZE];
 
 // dual output class for serial and BLE for shorter code
 class DualPrint : public Print
@@ -1036,6 +1053,79 @@ bool sendMeshFrame(MeshHeader &header, const uint8_t *payload)
     return true;
 }
 
+// Listen Before Talk: check if channel is free by scanning RSSI
+bool isChannelFree()
+{
+    float rssi = radio.getRSSI();
+    return rssi < LBT_RSSI_THRESHOLD;
+}
+
+// Send a mesh frame with LBT – retries up to LBT_MAX_RETRIES if channel is busy
+bool sendMeshFrameWithLBT(MeshHeader &header, const uint8_t *payload)
+{
+    for (uint8_t attempt = 0; attempt < LBT_MAX_RETRIES; attempt++)
+    {
+        if (isChannelFree())
+            return sendMeshFrame(header, payload);
+        delay(LBT_RETRY_DELAY_MS + random(0, 50));
+    }
+    out.println("LBT: channel busy, frame dropped.");
+    return false;
+}
+
+// Buffer an image frame for LBT relay by intermediate nodes
+bool bufferImgRelay(const MeshHeader &hdr, const uint8_t *payload)
+{
+    for (uint8_t i = 0; i < IMG_RELAY_BUFFER_SIZE; i++)
+    {
+        if (!imgRelayBuffer[i].active)
+        {
+            imgRelayBuffer[i].active = true;
+            imgRelayBuffer[i].header = hdr;
+            memcpy(imgRelayBuffer[i].payload, payload, hdr.payloadLen);
+            imgRelayBuffer[i].retries = 0;
+            imgRelayBuffer[i].nextRetryAt = millis() + random(20, 80);
+            return true;
+        }
+    }
+    return false; // buffer full
+}
+
+// Process pending image relay frames (called from loop)
+void processImgRelayBuffer()
+{
+    uint32_t now = millis();
+    for (uint8_t i = 0; i < IMG_RELAY_BUFFER_SIZE; i++)
+    {
+        if (!imgRelayBuffer[i].active)
+            continue;
+        if (now < imgRelayBuffer[i].nextRetryAt)
+            continue;
+
+        if (isChannelFree())
+        {
+            sendMeshFrame(imgRelayBuffer[i].header, imgRelayBuffer[i].payload);
+            imgRelayBuffer[i].active = false;
+            out.print("IMG_RELAY sent msgId=");
+            out.println(imgRelayBuffer[i].header.msgId);
+        }
+        else
+        {
+            imgRelayBuffer[i].retries++;
+            if (imgRelayBuffer[i].retries >= LBT_MAX_RETRIES)
+            {
+                imgRelayBuffer[i].active = false;
+                out.print("IMG_RELAY dropped msgId=");
+                out.println(imgRelayBuffer[i].header.msgId);
+            }
+            else
+            {
+                imgRelayBuffer[i].nextRetryAt = now + LBT_RETRY_DELAY_MS + random(0, 100);
+            }
+        }
+    }
+}
+
 // Outgoing message buffer management for reliable send(optoional feature)
 int findFreeOutboundSlot()
 {
@@ -1141,7 +1231,7 @@ void printOutboundBuffer()
 }
 
 // Forward declaration
-bool sendTextTo(uint16_t destination, const String &text, bool encrypted = false);
+bool sendTextTo(uint16_t destination, const String &text, bool encrypted = false, bool useLBT = false);
 
 // ACK helper
 
@@ -1171,7 +1261,7 @@ void sendTraceRoute(uint16_t destination)
     }
 }
 
-bool sendTextTo(uint16_t destination, const String &text, bool encrypted)
+bool sendTextTo(uint16_t destination, const String &text, bool encrypted, bool useLBT)
 {
     if (text.length() == 0)
     {
@@ -1208,7 +1298,8 @@ bool sendTextTo(uint16_t destination, const String &text, bool encrypted)
     }
 
     rememberSeen(header.origin, header.msgId);
-    bool sent = sendMeshFrame(header, payloadBytes);
+    bool sent = useLBT ? sendMeshFrameWithLBT(header, payloadBytes)
+                       : sendMeshFrame(header, payloadBytes);
 
     // Buffer for reliable delivery if enabled, directed, and not a control/ACK message
     if (sent && reliableSendEnabled &&
@@ -1462,6 +1553,33 @@ void relayIfNeeded(const MeshHeader &incoming, const uint8_t *payload, bool alre
     }
 }
 
+// Relay image frames through LBT buffer for intermediate nodes
+void relayImageIfNeeded(const MeshHeader &incoming, const uint8_t *payload, bool alreadySeen)
+{
+    if (alreadySeen)
+        return;
+    if (incoming.destination == nodeId) // we are the target, dont relay
+        return;
+    if (incoming.hopCount >= incoming.maxHops)
+        return;
+
+    MeshHeader relay = incoming;
+    relay.hopCount = incoming.hopCount + 1;
+    rememberSeen(relay.origin, relay.msgId);
+
+    if (bufferImgRelay(relay, payload))
+    {
+        out.print("IMG_RELAY buffered msgId=");
+        out.print(relay.msgId);
+        out.print(" to=0x");
+        out.println(relay.destination, HEX);
+    }
+    else
+    {
+        out.println("IMG_RELAY buffer full, frame dropped.");
+    }
+}
+
 void handleReceivedPacket()
 {
     const size_t packetLen = radio.getPacketLength();
@@ -1484,6 +1602,13 @@ void handleReceivedPacket()
     MeshHeader header;
     memcpy(&header, frame, sizeof(MeshHeader));
     if (header.magic != MESH_MAGIC || header.version != MESH_VERSION)
+    {
+        restartReceive();
+        return;
+    }
+
+    // Drop packets originating from ourselves (broadcast loopback)
+    if (header.origin == nodeId)
     {
         restartReceive();
         return;
@@ -1677,7 +1802,7 @@ void handleReceivedPacket()
     }
     else
     {
-        // packet not for this node but logging and potential relay
+        // packet not for this node — decode payload for image-frame detection
         bool encrypted = (header.flags & MESH_FLAG_ENCRYPTED) != 0;
         if (!encrypted)
         {
@@ -1686,11 +1811,31 @@ void handleReceivedPacket()
         }
         else
         {
+            // Decrypt a copy so we can detect image frames for LBT relay
+            uint8_t tempBuf[MAX_MESH_PAYLOAD];
+            memcpy(tempBuf, payloadPtr, copyLen);
+            int keyIndex = findPeerKeyIndex(header.origin);
+            if (keyIndex >= 0)
+                cryptPayload(tempBuf, copyLen, peerKeys[keyIndex].key, header);
+            else
+                cryptPayload(tempBuf, copyLen, PUBLIC_KEY, header);
+            memcpy(textBuffer, tempBuf, copyLen);
+            textBuffer[copyLen] = '\0';
             decryptedYeah = false;
         }
     }
 
-    relayIfNeeded(header, payloadPtr, alreadySeen, decryptedYeah ? textBuffer : nullptr);
+    // Route image frames through LBT relay buffer; other frames through normal relay
+    bool isImageFrame = (strncmp(textBuffer, "#MESH_IMG_S", 11) == 0 ||
+                         strncmp(textBuffer, "#MESH_IMG_C", 11) == 0);
+    if (isImageFrame)
+    {
+        relayImageIfNeeded(header, payloadPtr, alreadySeen);
+    }
+    else
+    {
+        relayIfNeeded(header, payloadPtr, alreadySeen, decryptedYeah ? textBuffer : nullptr);
+    }
 
     restartReceive();
 }
@@ -2284,7 +2429,7 @@ void handleSerialLine(String line)
             return;
         }
         String payload = String("#MESH_IMG_S:") + meta;
-        if (sendTextTo(targetNode, payload))
+        if (sendTextTo(targetNode, payload, false, true))
         {
             out.print("IMG_START -> 0x");
             out.println(targetNode, HEX);
@@ -2313,7 +2458,7 @@ void handleSerialLine(String line)
             return;
         }
         String payload = String("#MESH_IMG_C:") + meta;
-        if (sendTextTo(targetNode, payload))
+        if (sendTextTo(targetNode, payload, false, true))
         {
             out.print("IMG_CHUNK -> 0x");
             out.println(targetNode, HEX);
@@ -2363,8 +2508,15 @@ void setup()
     delay(200);
 
     uint64_t mac = ESP.getEfuseMac();
-    // Derive a MAC-based ID as fallback before we try to load from flash
-    uint16_t macDerivedId = static_cast<uint16_t>(mac & 0xFFFF);
+    // Old algorithm: just lowest 16 bits (may collide across v4 boards)
+    uint16_t oldStyleId = static_cast<uint16_t>(mac & 0xFFFF);
+    // New: XOR all MAC bytes into 16 bits for better uniqueness
+    uint16_t macDerivedId = static_cast<uint16_t>((mac ^ (mac >> 16) ^ (mac >> 32)) & 0xFFFF);
+    // Avoid reserved addresses (0 = invalid, 0xFFFF = broadcast)
+    if (macDerivedId == 0 || macDerivedId == MESH_BROADCAST)
+    {
+        macDerivedId = static_cast<uint16_t>((esp_random() & 0xFFFE) | 1);
+    }
     randomSeed(static_cast<unsigned long>(micros()) ^ static_cast<unsigned long>(macDerivedId));
 
     // Load persistent settings from flash (before radio init so loraPower is used)
@@ -2378,6 +2530,13 @@ void setup()
             nodeId = macDerivedId;
             markSettingsDirty();
             out.println("[FLASH] Recovered zero nodeId from MAC.");
+        }
+        else if (nodeId == oldStyleId && oldStyleId != macDerivedId)
+        {
+            // Migrate from old collision-prone MAC-LSB16 ID to new XOR-folded ID
+            nodeId = macDerivedId;
+            markSettingsDirty();
+            out.println("[FLASH] Migrated nodeId to avoid v4 MAC collision.");
         }
         else
         {
@@ -2636,6 +2795,7 @@ void loop()
         {
             lastOutboundProcessMs = nowMs;
             processOutboundBuffer();
+            processImgRelayBuffer();
         }
     }
 
